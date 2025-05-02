@@ -19,6 +19,7 @@ library(powerjoin)
 library(glue)
 library(vip)
 library(baguette)
+library(recipes)
 ```
 
 ### Question 1:
@@ -149,7 +150,8 @@ camels_cv <- vfold_cv(camels_train, v = 10)
 
 ```
 
-```{<-  recipe(logQmean ~ aridity + p_mean, data = camels_train) %>%}
+```{r}
+rec <-  recipe(logQmean ~ aridity + p_mean, data = camels_train) %>%
 
   step_log(all_predictors()) %>%
 
@@ -285,12 +287,10 @@ wf_new <- workflow_set(
   list(lm_model, rf_model, xgb_model, nn_model)
 ) %>%
   workflow_map('fit_resamples', resamples = camels_cv)
-
 ```
 
 ```{r}
 autoplot(wf_new)
-
 ```
 
 ```{r}
@@ -300,37 +300,181 @@ rank_results(wf_new, rank_metric = "rsq", select_best = TRUE)
 
 Based on this ranking, we can see that the neural network model ranked above the others. Because of this, I would choose this model to move forward with.
 
-### Question 4: 
+### Question 4:
 
 ```{r}
 camels |> 
-  select(slope_fdc, runoff_ratio, q_mean) |> 
+  select(high_prec_freq, low_prec_freq, q_mean) |> 
   drop_na() |> 
   cor()
 ```
 
-
-##### Data splitting: 
+**Data Splitting:**
 
 ```{r}
-set.seed(426)
+ggplot(camels, aes(x = high_prec_freq, y = low_prec_freq)) +
+  geom_point(aes(color = q_mean)) +
+  geom_smooth(method = "lm", color = "red", linetype = 2) +
+  scale_color_viridis_c() +
+  theme_linedraw() + 
+  theme(legend.position = "bottom") + 
+  labs(title = "Aridity vs Rainfall vs Runnoff", 
+       x = "high precipitation frequency", 
+       y = "low precipitation frequency",
+       color = "Mean Flow")
 ```
 
 ```{r}
-camels_split <- initial_split(camels, prop = 0.75)
-camels_train <- training(camels_split)
-camels_test <- testing(camels_split)
+set.seed(275)
+
+camels_split2 <- initial_split(camels, prop = 0.8)
+camels_train2 <- training(camels_split2)
+camels_test2  <- testing(camels_split2)
+
+camels_cv2 <- vfold_cv(camels_train2, v = 10)
+```
+
+**Recipe:**
+
+```{r}
+rec2 <-  recipe(q_mean ~ high_prec_freq + low_prec_freq, data = camels_train2) %>%
+  step_interact(terms = ~ high_prec_freq:low_prec_freq) |> 
+  step_naomit(all_predictors(), all_outcomes())
 ```
 
 ```{r}
-camels_cv <- vfold_cv(camels_train, v = 10)
-```
+baked_data <- prep(rec2, camels_train2) |> 
+  bake(new_data = NULL)
 
-##### Recipe: 
+lm_base <- lm(q_mean ~ high_prec_freq * low_prec_freq, data = baked_data)
+summary(lm_base)
+```
 
 ```{r}
-rec <- recipe(logQmean ~ slope_fdc + runoff_ratio, data = camels_train) %>%
-  step_log(all_predictors()) %>%
-  step_naomit(all_predictors(), all_outcomes()) 
-
+test_data2 <-  bake(prep(rec2), new_data = camels_test2)
+test_data2$lm_pred2 <- predict(lm_base, newdata = test_data2)
 ```
+
+```{r}
+metrics(test_data2, truth = q_mean, estimate = lm_pred2)
+```
+
+```{r}
+ggplot(test_data2, aes(x = q_mean, y = lm_pred2, colour = high_prec_freq)) +
+  scale_color_gradient2(low = "brown", mid = "orange", high = "darkgreen") +
+  geom_point() +
+  geom_abline(linetype = 2) +
+  theme_linedraw() + 
+  labs(title = "Linear Model: Observed vs Predicted",
+       x = "Observed Mean Flow",
+       y = "Predicted Mean Flow",
+       color = "High Precipitation Frequency")
+```
+
+**Workflow:**
+
+```{r}
+lm_model2 <- linear_reg() %>%
+  set_engine("lm") %>%
+  set_mode("regression")
+
+lm_wf2 <- workflow() %>%
+  add_recipe(rec2) %>%
+  add_model(lm_model2) %>%
+  fit(data = camels_train2) 
+
+summary(extract_fit_engine(lm_wf2))$coefficients
+```
+
+```{r}
+summary(lm_base)$coefficients
+```
+
+```{r}
+lm_data2 <- augment(lm_wf2, new_data = camels_test2)
+dim(lm_data)
+```
+
+```{r}
+metrics(lm_data2, truth = q_mean, estimate = .pred)
+```
+
+```{r}
+ggplot(lm_data2, aes(x = q_mean, y = .pred, colour = high_prec_freq)) +
+  scale_color_viridis_c() +
+  geom_point() +
+  geom_abline() +
+  theme_linedraw()
+```
+
+```{r}
+library(baguette)
+rf_model2 <- rand_forest() %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+rf_wf2 <- workflow() %>%
+  add_recipe(rec2) %>%
+  add_model(rf_model2) %>%
+  fit(data = camels_train2) 
+```
+
+```{r}
+rf_data2 <- augment(rf_wf2, new_data = camels_test2)
+dim(rf_data2)
+```
+
+```{r}
+metrics(rf_data2, truth = q_mean, estimate = .pred)
+```
+
+```{r}
+ggplot(rf_data2, aes(x = q_mean, y = .pred, colour = high_prec_freq)) +
+  scale_color_viridis_c() +
+  geom_point() +
+  geom_abline() +
+  theme_linedraw()
+```
+
+```{r}
+wf2 <- workflow_set(list(rec2), list(lm_model2, rf_model2)) %>%
+  workflow_map('fit_resamples', resamples = camels_cv2) 
+
+autoplot(wf2)
+```
+
+```{r}
+rank_results(wf2, rank_metric = "rsq", select_best = TRUE)
+```
+
+```{r}
+xgb_model2 <- boost_tree() %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+```
+
+```{r}
+nn_model <- bag_mlp() %>%
+  set_engine("nnet") %>%
+  set_mode("regression")
+```
+
+```{r}
+wf_new2 <- workflow_set(
+  list(rec), 
+  list(lm_model, rf_model, xgb_model, nn_model)
+) %>%
+  workflow_map('fit_resamples', resamples = camels_cv2)
+```
+
+```{r}
+autoplot(wf_new2)
+```
+
+**Evaluation:**
+
+```{r}
+rank_results(wf_new2, rank_metric = "rsq", select_best = TRUE)
+```
+
+The random forest model seems to be the best one. This is because it has the highest r squared value, meaning the correlation is the strongest between variables.
